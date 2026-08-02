@@ -22,6 +22,7 @@ Now that disclaimer has been said, here is a description of requirements to use 
    - For 64 Bit branch Model Tool, use the [RAID Model Tool](https://github.com/diesel-modding/raid-model-tool) (Fair warning, tangents are completely messed up on this branch)
 
 ## Blender Requirements
+- [Blender](https://www.blender.org/) 4.0.0 or higher
 - The [Diesel Model Tool Wrapper](https://gitlab.com/cpone/io_scene_dieselmodeltoolwrapper)
 -  [Diesel Animation Importer](https://gitlab.com/cpone/io_scene_dieselanim) (Optional, this add-on does not currently support animation imports)
 
