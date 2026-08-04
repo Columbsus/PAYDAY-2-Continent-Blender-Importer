@@ -15,17 +15,25 @@ import os
 import re
 import math
 import time
+import struct
 import shutil
 import tempfile
 import subprocess
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bpy.props import (StringProperty, BoolProperty, EnumProperty,
                        FloatProperty, IntProperty)
 from bpy.types import AddonPreferences, Operator
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Vector, Matrix
+
+# colorsys, pickle, numpy, and concurrent.futures (ThreadPoolExecutor /
+# as_completed) are imported lazily, right where they're used, because
+# each is only needed on a narrow, optional code path (material tinting,
+# hashlist disk-caching, BC5 texture decoding, and parallel model
+# conversion respectively) rather than on every addon load. Everything
+# else above is used on essentially every real import run (or at module
+# scope), so keeping it eager here avoids paying for it mid-operation.
 
 LOG_PREFIX = "[PD2 Importer]"
 
@@ -57,6 +65,10 @@ _dup_suffix_re = re.compile(r"^(.*)\.(\d{3,})$")
 KEEP_TRANSFORM_PROP = "_pd2_keep_transform"
 SHADOW_FLAG_PROP = "_pd2_shadow_projection"
 KEEP_MESH_PREFIXES = ("g_", "rp_")
+
+DELETE_MATERIAL_NAMES = frozenset({
+    "mtr_hub_elements", "mat_occluder_plane", "mtr_occluder_plane", "mtr_omni", "mat_omni", "mtr_interact_sphere", "mtr_mat", "mat_mtr", "editor_mat",
+})
 
 def log(msg):
     print(f"{LOG_PREFIX} {msg}")
@@ -92,8 +104,6 @@ def parse_triplet(s, kind):
     except Exception:
         log_error(f"Could not parse {kind} string: {s!r} -> defaulting to (0,0,0)")
         return (0.0, 0.0, 0.0)
-
-import struct
 
 _SD_X64_MAGIC = 568494624
 
@@ -803,7 +813,19 @@ def deselect_all():
     for o in sel:
         o.select_set(False)
 
-_NICE_EXE = shutil.which("nice") if os.name != "nt" else None
+_NICE_EXE = None
+_NICE_EXE_RESOLVED = False
+
+def _find_nice_exe():
+    # Resolved lazily (and cached) on first use rather than at import time --
+    # shutil.which() walks the whole PATH, which is wasted work on every
+    # single Blender startup for a value nothing needs unless a model is
+    # actually being converted with low_priority=True.
+    global _NICE_EXE, _NICE_EXE_RESOLVED
+    if not _NICE_EXE_RESOLVED:
+        _NICE_EXE = shutil.which("nice") if os.name != "nt" else None
+        _NICE_EXE_RESOLVED = True
+    return _NICE_EXE
 
 def _low_priority_popen_kwargs():
 \
@@ -818,7 +840,7 @@ def _low_priority_popen_kwargs():
 def _nice_cmd(cmd, low_priority):
 \
 
-    if low_priority and _NICE_EXE:
+    if low_priority and _find_nice_exe():
         return [_NICE_EXE, "-n", "10"] + cmd
     return cmd
 
@@ -977,6 +999,11 @@ def convert_all_models_parallel(parser_exe, unique_paths, assets_dir, tmp_dir,
 
     workers = max(1, min(max_workers, len(jobs)))
     log(f"Converting {len(jobs)} unique models with {workers} parallel workers...")
+
+    # Deferred until we know we actually have jobs to run in parallel -- if
+    # every model was already served from the conversion cache above, we
+    # return before ever touching concurrent.futures.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def run_one(job):
         model_path, glb_path, cache_path, unit_paths = job
@@ -1204,6 +1231,86 @@ def filter_g_meshes(objects, fallback_parent=None):
     vlog(f"  -> only-g_ filter removed {n_removed} mesh(es), "
          f"kept {len(survivors)} object(s) "
          f"({n_lights_kept} light(s), {n_orphaned} re-rooted)")
+
+    return survivors
+
+def material_base_name(name):
+
+    m = _dup_suffix_re.match(name or "")
+    if m:
+        name = m.group(1)
+    return name.split("#", 1)[0].strip().lower()
+
+def mesh_uses_deleted_material(obj, names=None):
+
+    if obj.type != 'MESH':
+        return False
+    names = DELETE_MATERIAL_NAMES if names is None else names
+    if not names:
+        return False
+    for slot in obj.material_slots:
+        mat = slot.material
+        if mat is not None and material_base_name(mat.name) in names:
+            return True
+
+    data = getattr(obj, "data", None)
+    if data is not None:
+        for mat in data.materials:
+            if mat is not None and material_base_name(mat.name) in names:
+                return True
+    return False
+
+def filter_material_meshes(objects, fallback_parent=None, names=None):
+
+    names = DELETE_MATERIAL_NAMES if names is None else names
+    if not names:
+        return list(objects)
+
+    to_delete = [o for o in objects if mesh_uses_deleted_material(o, names)]
+    if not to_delete:
+        return list(objects)
+
+    delete_set = set(to_delete)
+    delete_names = [o.name for o in to_delete]
+    survivor_names = [o.name for o in objects if o not in delete_set]
+
+    world_cache = {}
+    survivors_live = [o for o in objects if o not in delete_set]
+    worlds = {o.name: local_world_matrix(o, world_cache)
+              for o in survivors_live}
+
+    n_orphaned = 0
+    for o in survivors_live:
+        p = o.parent
+        depth = 0
+        while p in delete_set and depth < _MAX_PARENT_DEPTH:
+            p = p.parent
+            depth += 1
+        if p is not o.parent:
+            reparent_keep_world(o, p if p is not None else fallback_parent,
+                                worlds[o.name])
+            if p is None and fallback_parent is None:
+                o[KEEP_TRANSFORM_PROP] = True
+                n_orphaned += 1
+
+    n_removed = 0
+    for name in delete_names:
+        o = bpy.data.objects.get(name)
+        if o is None:
+            continue
+        data = o.data
+        bpy.data.objects.remove(o, do_unlink=True)
+        n_removed += 1
+        if data is not None and data.users == 0:
+            try:
+                bpy.data.meshes.remove(data)
+            except (ReferenceError, RuntimeError):
+                pass
+
+    survivors = [o for o in (bpy.data.objects.get(nm) for nm in survivor_names)
+                 if o is not None]
+    vlog(f"  -> material filter removed {n_removed} mesh(es), "
+         f"kept {len(survivors)} object(s) ({n_orphaned} re-rooted)")
 
     return survivors
 
@@ -1854,6 +1961,17 @@ def _find_material_config_uncached(unit_path, assets_dir):
 
     for ref in dangling:
         log_error(f"  material_config not found on disk: {ref}")
+
+    if not dangling:
+        # Nothing above matched at all -- not even a dangling materials=
+        # reference -- so this unit's .object couldn't be found, or it
+        # doesn't reference a materials= path, or no material_config
+        # shares its name. That's the "prints nothing, applies nothing"
+        # failure mode: always log it so it isn't invisible under
+        # default (non-verbose) logging.
+        log_error(f"  could not resolve a material_config for "
+                  f"'{unit_path}' by any method (unit name, .object "
+                  f"materials= reference, sibling name, or beside .model)")
     return None
 
 def parse_material_config(mc_path):
@@ -2131,6 +2249,7 @@ def prefetch_textures_parallel(diesel_paths, assets_dir, max_workers=4):
     paths = list(diesel_paths)
     if not paths:
         return 0, 0
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     workers = max(1, min(max_workers, len(paths)))
     ok = failed = 0
     t0 = time.time()
@@ -2216,10 +2335,18 @@ def _is_cubemap_strip(diesel_path, assets_dir):
     _fc, w, h, _off = hdr
     return (h == w * 6) or (w == h * 6)
 
+# Normal maps always take X from the alpha channel. Y comes from whichever
+# channel actually holds the green-axis data, which depends on how the
+# texture is stored on disk:
+#   - Uncompressed / raw RG normal maps (no DXT/BC fourcc) pack Y into Red.
+#   - DXT5-compressed normal maps pack Y into Green (the standard DXT5nm
+#     layout -- Red is unused/duplicated, Green holds Y, Alpha holds X).
+# This replaces the old approach of sampling/inspecting pixel colors to
+# guess the layout -- reading the DDS pixel-format fourcc directly is
+# deterministic and far cheaper.
+_DXT5_FOURCC = b"DXT5"
+
 def _detect_normal_mode(img):
-\
-\
-\
 \
 \
 \
@@ -2230,7 +2357,24 @@ def _detect_normal_mode(img):
     cached = _normal_mode_cache.get(img.name)
     if cached is not None:
         return cached
-    mode = (1.0, 1.0)
+
+    x_from_alpha = 1.0
+    swap_xy = 1.0
+    path = img.filepath_raw or img.filepath
+    if path:
+        path = bpy.path.abspath(path)
+        hdr = _dds_header(path)
+        if hdr and hdr[0] == _DXT5_FOURCC:
+
+            swap_xy = 0.0
+        else:
+
+            swap_xy = 1.0
+    else:
+        vlog(f"  normal map '{img.name}' has no filepath -- "
+             f"assuming uncompressed RG layout")
+
+    mode = (swap_xy, x_from_alpha)
     _normal_mode_cache[img.name] = mode
     return mode
 
@@ -2282,10 +2426,10 @@ def get_pd2_node_group():
     sock_in("Normal Swap XY", 'NodeSocketFloat', 1.0, (0.0, 1.0))
     sock_in("Normal X From Alpha", 'NodeSocketFloat', 0.0, (0.0, 1.0))
     sock_in("Normal Strength", 'NodeSocketFloat', 1.0, (0.0, 10.0))
-    sock_in("Base Roughness", 'NodeSocketFloat', 0.65, (0.0, 1.0))
+    sock_in("Base Roughness", 'NodeSocketFloat', 0.7, (0.0, 1.0))
     sock_in("Illum Tint", 'NodeSocketColor', (1.0, 1.0, 1.0, 1.0))
-    sock_in("Specular Strength", 'NodeSocketFloat', 1.5, (0.0, 10.0))
-    sock_in("Gloss Boost", 'NodeSocketFloat', 1.5, (0.05, 10.0))
+    sock_in("Specular Strength", 'NodeSocketFloat', 1.25, (0.0, 10.0))
+    sock_in("Gloss Boost", 'NodeSocketFloat', 1.3, (0.05, 10.0))
     sock_in("Cube Reflection", 'NodeSocketFloat', 0.0, (0.0, 2.0))
     sock_in("Cubemap", 'NodeSocketColor', (0.45, 0.48, 0.52, 1.0))
     sock_in("Metallic", 'NodeSocketFloat', 0.0, (0.0, 1.0))
@@ -2549,6 +2693,25 @@ IGNORED_FLAG_PREFIXES = ("RL_", "SKINNED_", "CONTOUR", "DEPTH_SCALING",
 def _template_flags(render_template):
     return set(f for f in render_template.split(":") if f)
 
+TINT_SATURATION_BOOST = 1.5
+
+def _boost_saturation(rgb, mult=TINT_SATURATION_BOOST):
+    """Push a material_config tint colour's saturation up by `mult`.
+
+    Hue and brightness (HSV value) are left exactly as the .material_config
+    states them -- only saturation is scaled, then clamped to 1.0 so an
+    already-vivid tint can't wrap around. Greys (saturation 0) stay grey.
+    Returns an RGBA tuple ready for a colour socket's default_value.
+    """
+    try:
+        r, g, b = (max(float(c), 0.0) for c in rgb[:3])
+    except (TypeError, ValueError):
+        return (1.0, 1.0, 1.0, 1.0)
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    r, g, b = colorsys.hsv_to_rgb(h, min(s * mult, 1.0), v)
+    return (r, g, b, 1.0)
+
 def make_color_mix(nt, blend_type='MIX', location=(0, 0), label=""):
 \
 \
@@ -2562,12 +2725,20 @@ def make_color_mix(nt, blend_type='MIX', location=(0, 0), label=""):
         n.data_type = 'RGBA'
         n.blend_type = blend_type
         n.clamp_factor = True
-        col_in = [s for s in n.inputs if s.type == 'RGBA']
-        col_out = [s for s in n.outputs if s.type == 'RGBA']
-        fac = n.inputs[0]
-        a_sock, b_sock = col_in[0], col_in[1]
-        res = col_out[0]
-    except (RuntimeError, TypeError, IndexError):
+
+        # ShaderNodeMix internally keeps a Factor/A/B/Result socket for
+        # each data_type (Float, Vector, Color) at once; only the set
+        # matching the active data_type is shown in the UI. Indexing by
+        # position (n.inputs[0], etc.) risks landing on the wrong
+        # data_type's socket depending on internal declaration order --
+        # looking sockets up by their displayed name ("Factor"/"A"/"B"/
+        # "Result", the same labels the UI shows) is what's actually
+        # guaranteed to match the RGBA-mode sockets we just enabled.
+        fac = n.inputs["Factor"]
+        a_sock = n.inputs["A"]
+        b_sock = n.inputs["B"]
+        res = n.outputs["Result"]
+    except (RuntimeError, TypeError, KeyError):
         n = nt.nodes.new('ShaderNodeMixRGB')
         n.blend_type = blend_type
         fac = n.inputs["Fac"]
@@ -2716,7 +2887,16 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
         n, dif_out = blended("Diffuse", diffuse, blend_diffuse2, True,
                              "Diffuse")
 
-        if "VERTEX_COLOR" in flags and dif_out is not None:
+        # VERTEX_COLOR alone: multiply onto diffuse here.
+        # When BLUE_MASK_TINT is also present the vertex colour is wired
+        # through the blue-mask chain later (HSV sat-boost -> Mix B), so
+        # skip the early multiply to avoid double-handling / wrong order.
+        _has_blue_mask_flag = (
+            "BLUE_MASK_TINT" in flags
+            or "BLUE_MASK_TINT" in tpl.upper()
+        )
+        if ("VERTEX_COLOR" in flags and dif_out is not None
+                and not _has_blue_mask_flag):
             vc = nt.nodes.new('ShaderNodeVertexColor')
             vc.location = (240, 980)
             vc.label = "Vertex Color"
@@ -2804,21 +2984,149 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
         grp.inputs["Base Roughness"].default_value = min(
             max(1.0 - gv[0], 0.0), 1.0)
 
+    def _diffuse_link():
+        # Any `is` comparison between two separately-obtained references
+        # to "the same" Blender node/socket is unreliable -- Blender's
+        # Python RNA layer isn't guaranteed to hand back the identical
+        # wrapper object each time, whether that's grp.inputs["Diffuse"]
+        # vs a link's to_socket, OR (the mistake in an earlier version of
+        # this fix) `grp` itself vs a link's to_node. Comparing by name
+        # (node names are unique within a node tree) and socket
+        # identifier sidesteps wrapper identity entirely and is what
+        # actually matches what's really connected.
+        target_id = grp.inputs["Diffuse"].identifier
+        return next((l for l in nt.links
+                     if l.to_node.name == grp.name
+                     and l.to_socket.identifier == target_id),
+                    None)
+
+    def _has_tint_flag(flag):
+        """True if `flag` appears as a render_template flag OR as a
+        <variable name="..."> in the material_config.
+
+        The render_template is matched case-insensitively, and the
+        variables dict is checked too, because these markers show up in
+        both places depending on how the .material_config was authored.
+        """
+        f = flag.upper()
+        if any(x.upper() == f for x in flags):
+            return True
+        if f in tpl.upper():
+            return True
+        return any(f == k.upper() for k in variables)
+
     tc = _var_floats("tint_color")
-    if len(tc) >= 3 and "SIMPLE_TINT" in flags:
-        dif_link = next((l for l in nt.links
-                         if l.to_socket is grp.inputs["Diffuse"]), None)
+    tint_rgba = _boost_saturation(tc) if len(tc) >= 3 else None
+
+    want_blue_mask = _has_tint_flag("BLUE_MASK_TINT")
+    want_simple = _has_tint_flag("SIMPLE_TINT")
+
+    if want_blue_mask or want_simple:
+        vlog(f"  tint '{mat.name}': blue_mask={want_blue_mask} "
+            f"simple={want_simple} tint_color={tc if tc else 'MISSING'} "
+             f"tpl='{tpl}'")
+        if tint_rgba is None:
+            # A missing tint_color doesn't mean there's nothing to build.
+            # BLUE_MASK_TINT/SIMPLE_TINT alongside VERTEX_COLOR still
+            # wants the full tint chain. With VERTEX_COLOR the blue-mask
+            # path wires vertex colour through HSV (sat boost) into Mix B
+            # and uses ADD; without it, B is the solid tint_color. Since
+            # there's no tint_color value to use, fall back to a neutral
+            # white so the non-vertex path is a structural no-op until
+            # real data is available, rather than silently skipping it.
+            tint_rgba = (1.0, 1.0, 1.0, 1.0)
+            log(f"  tint '{mat.name}': no tint_color variable -- building "
+                f"the {'BLUE_MASK_TINT' if want_blue_mask else 'SIMPLE_TINT'} "
+                f"chain with a neutral white default "
+                f"(found variables: {sorted(variables)})")
+
+    if tint_rgba is not None and want_blue_mask:
+
+        dif_link = _diffuse_link()
+        if dif_link is None:
+
+            grp.inputs["Diffuse"].default_value = tint_rgba
+        else:
+            src = dif_link.from_socket
+            use_vertex = "VERTEX_COLOR" in flags
+
+            # Separate blue channel of the *raw* diffuse as the mask factor
+            sep = nt.nodes.new('ShaderNodeSeparateColor')
+            sep.location = (240, 1220)
+            sep.label = "Separate Color"
+            try:
+                sep.mode = 'RGB'
+            except (AttributeError, TypeError):
+                pass
+            nt.links.new(src, sep.inputs["Color"])
+
+            # Desaturated diffuse -> Mix A
+            rgb_to_bw = nt.nodes.new('ShaderNodeRGBToBW')
+            rgb_to_bw.location = (240, 1080)
+            rgb_to_bw.label = "RGB to BW"
+            nt.links.new(src, rgb_to_bw.inputs["Color"])
+
+            # Mix: Factor = blue mask, A = desaturated diffuse
+            # With VERTEX_COLOR: blend_type ADD, B = HSV-boosted vertex colour
+            # Without: blend_type MIX, B = solid tint_color (legacy path)
+            blend = 'ADD' if use_vertex else 'MIX'
+            _bm, b_fac, b_a, b_b, b_res = make_color_mix(
+                nt, blend, (520, 1140), "Add" if use_vertex else "Blue Mask Tint")
+            try:
+                _bm.clamp_result = False
+                _bm.clamp_factor = False
+            except (AttributeError, TypeError):
+                pass
+            nt.links.new(sep.outputs["Blue"], b_fac)
+            nt.links.new(rgb_to_bw.outputs["Val"], b_a)
+
+            if use_vertex:
+                # Vertex colour -> Hue/Saturation/Value (sat boost) -> Mix B
+                vc = nt.nodes.new('ShaderNodeVertexColor')
+                vc.location = (40, 960)
+                vc.label = "Color Attribute"
+                hsv = nt.nodes.new('ShaderNodeHueSaturation')
+                hsv.location = (280, 960)
+                hsv.label = "Hue/Saturation/Value"
+                hsv.inputs["Hue"].default_value = 0.5
+                hsv.inputs["Saturation"].default_value = TINT_SATURATION_BOOST
+                hsv.inputs["Value"].default_value = 1.0
+                hsv.inputs["Fac"].default_value = 1.0
+                nt.links.new(vc.outputs["Color"], hsv.inputs["Color"])
+                nt.links.new(hsv.outputs["Color"], b_b)
+                log(f"  BLUE_MASK_TINT '{mat.name}': vertex-color via "
+                    f"HSV(sat x{TINT_SATURATION_BOOST:g}) + ADD mask")
+            else:
+                b_b.default_value = tint_rgba
+                src_desc = (f"{tc[0]:.3f} {tc[1]:.3f} {tc[2]:.3f}"
+                           if len(tc) >= 3 else "(no tint_color, neutral default)")
+                log(f"  BLUE_MASK_TINT '{mat.name}': tint="
+                    f"{src_desc} -> "
+                    f"{tint_rgba[0]:.3f} {tint_rgba[1]:.3f} {tint_rgba[2]:.3f} "
+                    f"(saturation x{TINT_SATURATION_BOOST:g})")
+
+            nt.links.remove(dif_link)
+            nt.links.new(b_res, grp.inputs["Diffuse"])
+
+    elif tint_rgba is not None and want_simple:
+
+        dif_link = _diffuse_link()
         _tm, t_fac, t_a, t_b, t_res = make_color_mix(
-            nt, 'MULTIPLY', (240, 1160), "Diffuse Tint (x2)")
+            nt, 'MULTIPLY', (240, 1160), "Simple Tint")
         t_fac.default_value = 1.0
-        t_b.default_value = (min(tc[0] * 2.0, 1.0), min(tc[1] * 2.0, 1.0),
-                             min(tc[2] * 2.0, 1.0), 1.0)
+        t_b.default_value = tint_rgba
         if dif_link is not None:
             nt.links.new(dif_link.from_socket, t_a)
             nt.links.remove(dif_link)
         else:
             t_a.default_value = (1.0, 1.0, 1.0, 1.0)
         nt.links.new(t_res, grp.inputs["Diffuse"])
+        src_desc = (f"{tc[0]:.3f} {tc[1]:.3f} {tc[2]:.3f}"
+                   if len(tc) >= 3 else "(no tint_color, neutral default)")
+        log(f"  SIMPLE_TINT '{mat.name}': tint="
+            f"{src_desc} -> "
+             f"{tint_rgba[0]:.3f} {tint_rgba[1]:.3f} {tint_rgba[2]:.3f} "
+            f"(saturation x{TINT_SATURATION_BOOST:g})")
 
     if "CUBE_ENVIRONMENT_MAPPING" in flags or "GLOBAL_ENVIRONMENT_MAPPING" in flags:
         grp.inputs["Cube Reflection"].default_value = 0.5
@@ -2951,6 +3259,7 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
         mat.use_backface_culling = True
 
     mat["pd2_render_template"] = tpl
+    mat["pd2_variables"] = {str(k): str(v) for k, v in variables.items()}
     mat["pd2_textured"] = True
     mat["pd2_tex_sig"] = material_signature(mat_info)
 
@@ -2959,8 +3268,17 @@ def material_signature(mat_info):
 \
 
     tex = sorted((k, v) for k, v in (mat_info.get("textures") or {}).items())
+    # <variable> entries (tint_color, il_tint, blend_control, etc.) affect
+    # the built shader graph just as much as textures/render_template do --
+    # leaving them out of the signature meant two materials that share the
+    # same textures and template but differ only in, say, tint_color would
+    # hash identically. The first one built would "win" and every other
+    # material sharing that signature would be skipped as unchanged on
+    # every later rebuild, silently never getting its own tint applied.
+    var = sorted((k, v) for k, v in (mat_info.get("variables") or {}).items())
     payload = (mat_info.get("render_template", "") + "|"
-               + "|".join(f"{k}={v}" for k, v in tex))
+               + "|".join(f"{k}={v}" for k, v in tex) + "|"
+               + "|".join(f"{k}={v}" for k, v in var))
     return f"{diesel_hash(payload):016x}"
 
 def apply_pd2_materials(objects, unit_path, assets_dir):
@@ -2971,10 +3289,19 @@ def apply_pd2_materials(objects, unit_path, assets_dir):
 
     mc_path = find_material_config_for_unit(unit_path, assets_dir)
     if not mc_path:
-        vlog(f"  no material_config resolved for {unit_path}")
+        # This used to only be logged under VERBOSE, which meant a unit
+        # that fails material_config resolution entirely (no .object file
+        # found, or the .object never references a materials= path) would
+        # apply nothing and print nothing -- indistinguishable from "there
+        # was never any tint/material work to do here" in the console.
+        # It's a real, actionable failure, so it's always logged now.
+        log(f"  no material_config resolved for {unit_path} -- "
+            f"materials/tint left untouched")
         return 0
     mats_cfg = parse_material_config(mc_path)
     if not mats_cfg:
+        log(f"  material_config found ({os.path.basename(mc_path)}) but "
+            f"contained no parseable <material> entries for {unit_path}")
         return 0
 
     resolved = {}
@@ -3373,6 +3700,14 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         default=False,
     )
 
+    strip_material_meshes: BoolProperty(
+        name="Strip Hub Element Meshes",
+        description=("Delete every imported mesh that uses one of the "
+                     "materials in DELETE_MATERIAL_NAMES (mtr_hub_elements "
+                     "by default), regardless of the object's name"),
+        default=True,
+    )
+
     import_lights: BoolProperty(
         name="Import Lights",
         description=("Create Blender lights from the JSON light source data "
@@ -3604,6 +3939,12 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                         no_geometry.add(path)
                         vlog(f"  -> no g_ meshes in {path}; unit will be "
                              f"placed as an empty (lights still apply)")
+                if self.strip_material_meshes and objs:
+                    objs = filter_material_meshes(objs)
+                    if not objs:
+                        no_geometry.add(path)
+                        vlog(f"  -> all meshes in {path} used a stripped "
+                             f"material; unit will be placed as an empty")
                 if self.import_textures and objs:
                     apply_pd2_materials(objs, path, assets_dir)
                 if objs:
@@ -3682,6 +4023,10 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                                 stamp_light_shadow_flags(new_objects)
                             if self.only_g_meshes and new_objects:
                                 new_objects = filter_g_meshes(new_objects)
+                                if not new_objects:
+                                    no_geometry.add(path)
+                            if self.strip_material_meshes and new_objects:
+                                new_objects = filter_material_meshes(new_objects)
                                 if not new_objects:
                                     no_geometry.add(path)
                             if new_objects:
@@ -3964,6 +4309,7 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         layout.prop(self, "low_cpu_priority")
         layout.prop(self, "use_conversion_cache")
         layout.prop(self, "only_g_meshes")
+        layout.prop(self, "strip_material_meshes")
         layout.prop(self, "glass_fresnel")
         layout.prop(self, "light_cone_mode")
         if self.light_cone_mode in {'FAKE', 'VOLUME'}:
@@ -4059,16 +4405,72 @@ class PD2_OT_reapply_materials(Operator):
         self.report({'INFO'}, msg)
         return {'FINISHED'}
 
+class PD2_OT_delete_material_meshes(Operator):
+
+    bl_idname = "pd2_importer.delete_material_meshes"
+    bl_label = "Delete Meshes By Material"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material_names: StringProperty(
+        name="Materials",
+        description=("Comma-separated material names. Any mesh using one of "
+                     "them is deleted, whatever the object is called. "
+                     "Duplicate suffixes (.001) and #variant suffixes are "
+                     "ignored when matching"),
+        default=",".join(sorted(DELETE_MATERIAL_NAMES)),
+    )
+
+    selected_only: BoolProperty(
+        name="Selected Objects Only",
+        description="Limit the sweep to the current selection",
+        default=False,
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        names = frozenset(material_base_name(n)
+                          for n in self.material_names.split(",")
+                          if n.strip())
+        if not names:
+            self.report({'ERROR'}, "No material names given")
+            return {'CANCELLED'}
+
+        if self.selected_only:
+            objs = list(context.selected_objects)
+        else:
+            objs = list(context.scene.objects)
+        if not objs:
+            self.report({'WARNING'}, "No objects to check")
+            return {'CANCELLED'}
+
+        n_before = len(objs)
+        survivors = filter_material_meshes(objs, names=names)
+        n_removed = n_before - len(survivors)
+
+        msg = (f"Deleted {n_removed} mesh(es) using "
+               f"{', '.join(sorted(names))}")
+        log(msg)
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+def menu_func_object(self, context):
+    self.layout.operator(PD2_OT_delete_material_meshes.bl_idname,
+                         text="Delete Meshes By Material (PD2)")
+
 classes = (PD2LevelImporterPreferences, PD2_OT_clear_glb_cache,
-           PD2_OT_reapply_materials,
+           PD2_OT_reapply_materials, PD2_OT_delete_material_meshes,
            IMPORT_OT_pd2_level_json)
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.VIEW3D_MT_object.append(menu_func_object)
 
 def unregister():
+    bpy.types.VIEW3D_MT_object.remove(menu_func_object)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
