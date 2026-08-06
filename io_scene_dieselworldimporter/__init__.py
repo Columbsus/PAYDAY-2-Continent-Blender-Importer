@@ -1,10 +1,10 @@
 bl_info = {
     "name": "PAYDAY 2 Level Importer (JSON)",
     "author": "Columbus",
-    "version": (5, 12, 8),
+    "version": (5, 13, 0),
     "blender": (4, 0, 0),
     "location": "File > Import > PAYDAY 2 Level (.json)",
-    "description": "Imports PAYDAY 2 level .json files, converting .model files with PD2ModelParser (parallel), instancing repeats, and rebuilding textured materials from material_configs",
+    "description": "Imports PAYDAY 2 level .json files, converting .model files with PD2ModelParser (parallel + cache), instancing repeats, deferred material rebuild, optional extra-continent scan, and rebuilding textured materials from material_configs",
     "warning": "Requires io_scene_dieselmodeltoolwrapper (or _master) / PD2ModelParser.exe. Needs Blender 4.0+ (node group interface API)",
     "category": "Import-Export",
 }
@@ -155,7 +155,6 @@ HASHLIST_FILENAMES = ("hashes.txt", "hashlist", "hashlist.txt", "hashes")
 _hashlist_cache = None
 
 def find_hashlist_file(parser_exe):
-\
 
     if not parser_exe:
         return None
@@ -172,9 +171,6 @@ def find_hashlist_file(parser_exe):
     return None
 
 def load_hashlist(parser_exe):
-\
-\
-\
 
     global _hashlist_cache
     if _hashlist_cache is not None:
@@ -222,7 +218,6 @@ def load_hashlist(parser_exe):
     return table
 
 def resolve_idstring(h):
-\
 
     if _hashlist_cache:
         s = _hashlist_cache.get(h)
@@ -311,7 +306,6 @@ class _ScriptdataReader:
         raise ValueError(f"Unrecognised scriptdata tag {tag} at 0x{offset:x}")
 
 def _sd_jsonify(v):
-\
 
     if isinstance(v, tuple):
         if v[0] == "__vector__":
@@ -336,8 +330,6 @@ def _sd_jsonify(v):
     return v
 
 def parse_diesel_scriptdata(filepath):
-\
-\
 
     with open(filepath, "rb") as f:
         buf = f.read()
@@ -348,8 +340,6 @@ def parse_diesel_scriptdata(filepath):
     return _sd_jsonify(reader.value(reader.root_off))
 
 def convert_instances_to_json(instances, assets_dir, out_dir):
-\
-\
 
     os.makedirs(out_dir, exist_ok=True)
     n_ok = n_missing = 0
@@ -389,8 +379,6 @@ def convert_instances_to_json(instances, assets_dir, out_dir):
     return n_ok, n_missing
 
 def collect_instance_units(instances, assets_dir):
-\
-\
 
     groups = []
     for inst in instances:
@@ -464,7 +452,11 @@ def collect_instance_units(instances, assets_dir):
                 "lights": lights,
             })
         if inst_units:
-            groups.append({"instance": inst, "units": inst_units})
+            groups.append({
+                "instance": inst,
+                "units": inst_units,
+                "source": os.path.normcase(os.path.abspath(src)),
+            })
             log(f"  instance '{inst['name']}': {len(inst_units)} units from "
                 f"{os.path.basename(src)}")
         else:
@@ -472,8 +464,6 @@ def collect_instance_units(instances, assets_dir):
     return groups
 
 def apply_instance_unit_transform(root, position, quat):
-\
-\
 
     from mathutils import Quaternion as MQuat
     x, y, z, w = quat
@@ -487,8 +477,6 @@ MASSUNIT_INSTANCE_SIZE = 28
 MASSUNIT_ENTRY_SIZE = 32
 
 def find_massunit_file(json_path):
-\
-\
 
     world_dir = os.path.dirname(os.path.abspath(json_path))
     parent = os.path.dirname(world_dir)
@@ -507,7 +495,6 @@ def find_massunit_file(json_path):
     return None
 
 def parse_massunit_file(path):
-\
 
     try:
         with open(path, "rb") as f:
@@ -560,7 +547,6 @@ def parse_massunit_file(path):
     return out
 
 def _scan_prefs_for_exe(prefs_obj):
-\
 
     if prefs_obj is None:
         return None
@@ -593,9 +579,6 @@ def _scan_prefs_for_exe(prefs_obj):
     return best
 
 def find_parser_exe(own_prefs):
-\
-\
-\
 
     manual = bpy.path.abspath(own_prefs.parser_exe) if own_prefs.parser_exe else ""
     if manual and os.path.isfile(manual):
@@ -627,9 +610,6 @@ def find_layer_collection(layer_col, target_col):
     return None
 
 def set_collection_excluded(context, col, excluded):
-\
-\
-\
 
     lc = find_layer_collection(context.view_layer.layer_collection, col)
     if lc is not None:
@@ -638,10 +618,6 @@ def set_collection_excluded(context, col, excluded):
     return False
 
 def brute_force_zero_transform(obj):
-\
-\
-\
-\
 
     obj.matrix_parent_inverse.identity()
     obj.location = (0.0, 0.0, 0.0)
@@ -660,8 +636,6 @@ def brute_force_zero_transform(obj):
 _MAX_PARENT_DEPTH = 64
 
 def local_world_matrix(obj, cache=None, _depth=0):
-\
-\
 
     if obj is None:
         return Matrix.Identity(4)
@@ -683,7 +657,6 @@ def local_world_matrix(obj, cache=None, _depth=0):
     return m
 
 def reparent_keep_world(obj, new_parent, world):
-\
 
     obj.parent = new_parent
     obj.matrix_parent_inverse.identity()
@@ -693,7 +666,6 @@ def reparent_keep_world(obj, new_parent, world):
         obj.matrix_basis = local_world_matrix(new_parent).inverted_safe() @ world
 
 def clear_internal_markers(collection):
-\
 
     n_cleared = 0
     for o in collection.all_objects:
@@ -707,10 +679,6 @@ def clear_internal_markers(collection):
 def apply_unit_transform(root, position, rotation, rotation_order='XYZ',
                          flip_rot=(False, False, False),
                          flip_pos=(False, False, False), upright=True):
-\
-\
-\
-\
 
     rz, rx, ry = rotation
     if flip_rot[0]:
@@ -745,8 +713,6 @@ _unit_object_cache = {}
 _matconfig_for_unit = {}
 
 def _read_text_tolerant(full):
-\
-\
 
     if full in _text_cache:
         return _text_cache[full]
@@ -759,9 +725,6 @@ def _read_text_tolerant(full):
     return text
 
 def _object_path_from_unit(unit_path, assets_dir):
-\
-\
-\
 
     ck = (unit_path, assets_dir)
     if ck in _unit_object_cache:
@@ -782,9 +745,6 @@ def _object_path_from_unit(unit_path, assets_dir):
     return ref
 
 def find_model_file(unit_path, assets_dir):
-\
-\
-\
 
     if not unit_path:
         return None
@@ -828,8 +788,6 @@ def _find_nice_exe():
     return _NICE_EXE
 
 def _low_priority_popen_kwargs():
-\
-\
 
     if os.name == "nt":
 
@@ -838,14 +796,12 @@ def _low_priority_popen_kwargs():
     return {"start_new_session": True}
 
 def _nice_cmd(cmd, low_priority):
-\
 
     if low_priority and _find_nice_exe():
         return [_NICE_EXE, "-n", "10"] + cmd
     return cmd
 
 def convert_model_to_glb(parser_exe, model_path, glb_path, low_priority=True):
-\
 
     cmd = _nice_cmd([parser_exe, f"--load={model_path}",
                      f"--export={glb_path}"], low_priority)
@@ -898,6 +854,20 @@ def convert_model_to_glb(parser_exe, model_path, glb_path, low_priority=True):
 
 GLB_CACHE_DIRNAME = "pd2_glb_cache"
 TEX_CACHE_DIRNAME = "pd2_tex_cache"
+MAT_CACHE_DIRNAME = "pd2_mat_cache"
+
+# Directories skipped when scanning for additional .continent files.
+# These typically contain editor-only, collision, or non-visual data.
+SKIP_CONTINENT_DIRS = frozenset({
+    "editor_only", "occluder", "occluders", "cube_lights", "collision",
+    "shadow_caster", "shadow_casters", "player_collision", "temp_remove",
+    "mkp", "mockup", "nav_data", "navigation", "cover", "ai", "sound",
+    "sounds", "audio", "culling", "portals", "rooms", "rooms_only",
+    "prefabs", "temp", "tmp", "backup", "bak", "old", "unused",
+    "dev", "debug", "test", "tests", "WIP", "wip",
+})
+
+MIN_CONTINENT_BYTES = 1024  # skip files smaller than 1 KB
 
 def _glb_cache_dir():
     d = os.path.join(tempfile.gettempdir(), GLB_CACHE_DIRNAME)
@@ -923,9 +893,6 @@ def _dir_stats(path):
     return n_files, total
 
 def reset_module_caches():
-\
-\
-\
 
     global _hashlist_cache
     _hashlist_cache = None
@@ -934,9 +901,89 @@ def reset_module_caches():
         cache.clear()
     _reported_dds_formats.clear()
 
+def _mat_cache_dir():
+    d = os.path.join(tempfile.gettempdir(), MAT_CACHE_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _mat_cache_path(unit_path, mat_name, sig):
+    """Persistent cache key for a rebuilt material (unit + mat name + signature)."""
+    key = f"{unit_path.lower()}|{mat_name.lower()}|{sig}"
+    return os.path.join(_mat_cache_dir(), f"{diesel_hash(key):016x}.json")
+
+def scan_additional_continents(root_dir, max_files=200, skip_paths=None,
+                                exclude_dirs=None):
+    """Walk root_dir for .continent files, skipping known non-visual folders
+    and files smaller than MIN_CONTINENT_BYTES.
+
+    Only one .continent file is kept per folder (prefers world.continent,
+    then the largest file). Paths in skip_paths (normcased) are ignored.
+    Directories in exclude_dirs (and everything under them) are not entered.
+    Returns a list of absolute paths.
+    """
+    found = []
+    # folder -> (path, size, is_world) best candidate so far
+    per_folder = {}
+    root_dir = os.path.abspath(root_dir)
+    if not os.path.isdir(root_dir):
+        return found
+    skip = SKIP_CONTINENT_DIRS
+    skip_paths = {os.path.normcase(p) for p in (skip_paths or ())}
+    exclude_dirs = {os.path.normcase(os.path.abspath(d))
+                    for d in (exclude_dirs or ()) if d}
+    root_key = os.path.normcase(root_dir)
+    # If the scan root itself is excluded, nothing to do
+    if root_key in exclude_dirs:
+        return found
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        dir_key = os.path.normcase(os.path.abspath(dirpath))
+        # Prune ignored + explicitly excluded directories
+        pruned = []
+        for d in dirnames:
+            if d.lower() in skip or d.startswith('.'):
+                continue
+            child = os.path.normcase(os.path.abspath(os.path.join(dirpath, d)))
+            if child in exclude_dirs:
+                continue
+            pruned.append(d)
+        dirnames[:] = pruned
+        # Also skip collecting files from an excluded dir (if walk started there)
+        if dir_key in exclude_dirs:
+            continue
+        for fn in filenames:
+            if not fn.lower().endswith('.continent'):
+                continue
+            full = os.path.abspath(os.path.join(dirpath, fn))
+            key = os.path.normcase(full)
+            if key in skip_paths:
+                continue
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue
+            if size < MIN_CONTINENT_BYTES:
+                continue
+            folder_key = os.path.normcase(os.path.abspath(dirpath))
+            prev = per_folder.get(folder_key)
+            is_world = fn.lower() == "world.continent"
+            if prev is None:
+                per_folder[folder_key] = (full, size, is_world)
+            else:
+                _prev_path, prev_size, prev_world = prev
+                if is_world and not prev_world:
+                    per_folder[folder_key] = (full, size, True)
+                elif is_world == prev_world and size > prev_size:
+                    per_folder[folder_key] = (full, size, is_world)
+    for folder_key in sorted(per_folder.keys()):
+        path, _size, _world = per_folder[folder_key]
+        found.append(path)
+        if len(found) >= max_files:
+            log(f"Continent scan capped at {max_files} files")
+            break
+    return found
+
+
 def _glb_cache_path(model_path):
-\
-\
 
     try:
         st = os.stat(model_path)
@@ -949,13 +996,6 @@ def _glb_cache_path(model_path):
 def convert_all_models_parallel(parser_exe, unique_paths, assets_dir, tmp_dir,
                                 max_workers, progress_cb=None,
                                 low_priority=True, use_cache=True):
-\
-\
-\
-\
-\
-\
-\
 
     glb_map = {}
     missing = set()
@@ -997,8 +1037,18 @@ def convert_all_models_parallel(parser_exe, unique_paths, assets_dir, tmp_dir,
     if not jobs:
         return glb_map, missing
 
+    # Largest models first so the slowest jobs start early and the pool
+    # stays saturated; also improves cache hit patterns on re-runs.
+    def _job_size(job):
+        try:
+            return os.path.getsize(job[0])
+        except OSError:
+            return 0
+    jobs.sort(key=_job_size, reverse=True)
+
     workers = max(1, min(max_workers, len(jobs)))
-    log(f"Converting {len(jobs)} unique models with {workers} parallel workers...")
+    log(f"Converting {len(jobs)} unique models with {workers} parallel workers "
+        f"(largest first)...")
 
     # Deferred until we know we actually have jobs to run in parallel -- if
     # every model was already served from the conversion cache above, we
@@ -1050,9 +1100,6 @@ def convert_all_models_parallel(parser_exe, unique_paths, assets_dir, tmp_dir,
     return glb_map, missing
 
 def duplicate_objects(proto_objects, collection):
-\
-\
-\
 
     mapping = {}
     copies = []
@@ -1077,11 +1124,6 @@ def duplicate_objects(proto_objects, collection):
     return copies
 
 def import_glb(glb_path, collection):
-\
-\
-\
-\
-\
 
     sel = bpy.context.selected_objects
     if sel:
@@ -1091,9 +1133,17 @@ def import_glb(glb_path, collection):
     before_names = {o.name for o in bpy.data.objects}
     try:
         try:
-            bpy.ops.import_scene.gltf(filepath=glb_path, loglevel=50)
+            # import_pack_images=False: we rebuild materials/textures ourselves
+            # (apply_pd2_materials / prefetch_textures_parallel), so packing
+            # image data into the .blend on every single glTF import is pure
+            # overhead multiplied by every unique model in the level.
+            bpy.ops.import_scene.gltf(filepath=glb_path, loglevel=50,
+                                      import_pack_images=False)
         except TypeError:
-            bpy.ops.import_scene.gltf(filepath=glb_path)
+            try:
+                bpy.ops.import_scene.gltf(filepath=glb_path, loglevel=50)
+            except TypeError:
+                bpy.ops.import_scene.gltf(filepath=glb_path)
     except Exception as e:
         log_error(f"  glTF import failed: {e}")
         traceback.print_exc()
@@ -1118,15 +1168,6 @@ def import_glb(glb_path, collection):
     return new_objects
 
 def build_unit(new_objects, name_id, collection):
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     root = bpy.data.objects.new(name_id, None)
     root.empty_display_type = 'PLAIN_AXES'
@@ -1150,16 +1191,6 @@ def build_unit(new_objects, name_id, collection):
     return root
 
 def stamp_light_shadow_flags(objects):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     n_flagged = 0
     for o in objects:
@@ -1172,10 +1203,6 @@ def stamp_light_shadow_flags(objects):
         vlog(f"  -> flagged {n_flagged} shadow-projection light(s)")
 
 def filter_g_meshes(objects, fallback_parent=None):
-\
-\
-\
-\
 
     def base_name(o):
         m = _dup_suffix_re.match(o.name)
@@ -1236,7 +1263,15 @@ def filter_g_meshes(objects, fallback_parent=None):
 
 def material_base_name(name):
 
-    m = _dup_suffix_re.match(name or "")
+    # `name or ""` guards against None (mirrored below at the return so a
+    # None input can't slip past the `if m:` branch and reach `.split()`
+    # on a NoneType -- filter_material_meshes / mesh_uses_deleted_material
+    # currently only ever pass a real Material's .name (never None), but
+    # this is a small, general-purpose utility that's an easy thing to
+    # call with user- or future-caller-supplied input, so it should not
+    # be able to crash on a falsy name.
+    name = name or ""
+    m = _dup_suffix_re.match(name)
     if m:
         name = m.group(1)
     return name.split("#", 1)[0].strip().lower()
@@ -1333,7 +1368,6 @@ LIGHT_MULTIPLIER_PRESETS = {
 }
 
 def parse_light_multiplier(value):
-\
 
     if isinstance(value, (int, float)):
         return float(value)
@@ -1345,7 +1379,6 @@ def parse_light_multiplier(value):
     return 1.0
 
 def parse_color(s):
-\
 
     try:
         inner = s[s.index("(") + 1:s.rindex(")")]
@@ -1357,18 +1390,6 @@ def parse_color(s):
         return (1.0, 1.0, 1.0)
 
 def light_shadows_enabled(name, obj=None, extra_names=()):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     needle = "shadow_projection"
     for candidate in (name,) + tuple(extra_names):
@@ -1401,20 +1422,32 @@ LIGHT_CONE_NAME_HINTS = (
     "volumetric", "sunray",
 )
 
+def _name_looks_like_light_cone(text):
+    """True if a single name string matches a light-cone hint."""
+    if not text:
+        return False
+    low = text.lower()
+    # Strip Blender .001 suffixes and our #variant tags before matching
+    m = _dup_suffix_re.match(low)
+    if m:
+        low = m.group(1)
+    low = low.split("#", 1)[0]
+    return any(h in low for h in LIGHT_CONE_NAME_HINTS)
+
 def looks_like_light_cone(obj):
-\
-
-    def hit(text):
-        low = text.lower()
-        return any(h in low for h in LIGHT_CONE_NAME_HINTS)
-
+    """True if the object name OR any of its materials looks like a light cone."""
     m = _dup_suffix_re.match(obj.name)
-    if hit(m.group(1) if m else obj.name):
+    if _name_looks_like_light_cone(m.group(1) if m else obj.name):
         return True
     for slot in getattr(obj, "material_slots", ()):
-        if slot.material is not None and hit(slot.material.name):
+        if slot.material is not None and _name_looks_like_light_cone(slot.material.name):
             return True
     return False
+
+def _object_name_is_light_cone(obj):
+    """True only when the object itself is named like cone geometry."""
+    m = _dup_suffix_re.match(obj.name)
+    return _name_looks_like_light_cone(m.group(1) if m else obj.name)
 
 def _first_image_in_material(mat):
     if mat is None or not mat.use_nodes or mat.node_tree is None:
@@ -1425,20 +1458,6 @@ def _first_image_in_material(mat):
     return None
 
 def make_cone_fake_volume_material(mat, strength=0.4, falloff=1.6):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     base = mat.name if mat else "light_cone"
     m = _dup_suffix_re.match(base)
@@ -1515,114 +1534,62 @@ def make_cone_fake_volume_material(mat, strength=0.4, falloff=1.6):
     glow["pd2_cone_glow"] = True
     return glow
 
-def make_cone_volume_material(mat, strength=2.0, density=1.0):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
+def apply_light_cone_mode(objects, mode, strength=0.4, falloff=1.6):
+    """Apply light-cone treatment. True volumetric (VOLUME) was removed
+    for performance; FAKE is the high-quality fast path that retains UVs.
 
-    base = mat.name if mat else "light_cone"
-    m = _dup_suffix_re.match(base)
-    base = m.group(1) if m else base
-    vol_name = f"{base}#cone_volume"
-    existing = bpy.data.materials.get(vol_name)
-    if existing is not None:
-        return existing
-
-    img = _first_image_in_material(mat)
-    vol = bpy.data.materials.new(vol_name)
-    vol.use_nodes = True
-    nt = vol.node_tree
-    nt.nodes.clear()
-
-    out = nt.nodes.new('ShaderNodeOutputMaterial')
-    out.location = (400, 0)
-    pv = nt.nodes.new('ShaderNodeVolumePrincipled')
-    pv.location = (150, 0)
-    pv.inputs["Emission Strength"].default_value = strength
-
-    nt.links.new(pv.outputs["Volume"], out.inputs["Volume"])
-
-    if img is not None:
-        tc = nt.nodes.new('ShaderNodeTexCoord')
-        tc.location = (-620, -60)
-        tex = nt.nodes.new('ShaderNodeTexImage')
-        tex.location = (-420, -60)
-        tex.image = img
-        tex.label = "Light cone (Generated coords — volumes have no UVs)"
-        tex.extension = 'EXTEND'
-        nt.links.new(tc.outputs["Generated"], tex.inputs["Vector"])
-        nt.links.new(tex.outputs["Color"], pv.inputs["Emission Color"])
-        nt.links.new(tex.outputs["Color"], pv.inputs["Color"])
-
-        bw = nt.nodes.new('ShaderNodeRGBToBW')
-        bw.location = (-180, -260)
-        nt.links.new(tex.outputs["Color"], bw.inputs["Color"])
-        dens = nt.nodes.new('ShaderNodeMath')
-        dens.location = (-20, -260)
-        dens.operation = 'MULTIPLY'
-        dens.inputs[1].default_value = density
-        dens.label = "Density"
-        nt.links.new(bw.outputs["Val"], dens.inputs[0])
-        nt.links.new(dens.outputs[0], pv.inputs["Density"])
-    else:
-        pv.inputs["Color"].default_value = (1.0, 0.95, 0.85, 1.0)
-        pv.inputs["Emission Color"].default_value = (1.0, 0.95, 0.85, 1.0)
-        pv.inputs["Density"].default_value = density
-
-    if hasattr(vol, "shadow_method"):
-        vol.shadow_method = 'NONE'
-    vol.use_backface_culling = False
-    vol["pd2_cone_glow"] = True
-    return vol
-
-def apply_light_cone_mode(objects, mode, strength=0.4, density=1.0,
-                          falloff=1.6):
-\
-\
-\
-
+    On multi-material objects only the material slots whose names match a
+    light-cone hint are converted. All slots are converted only when the
+    *object* name itself looks like dedicated cone geometry.
+    """
     if mode == 'KEEP':
         return 0
     n_done = 0
     for o in objects:
-        if o.type != 'MESH' or not looks_like_light_cone(o):
+        if o.type != 'MESH':
             continue
-        if mode == 'HIDE':
-            o.hide_viewport = True
-            o.hide_render = True
-            n_done += 1
-            continue
+        obj_is_cone = _object_name_is_light_cone(o)
+        # Which slots look like cones?
+        cone_slots = []
         for slot in o.material_slots:
-            if slot.material is None or slot.material.get("pd2_cone_glow"):
+            mat = slot.material
+            if mat is None or mat.get("pd2_cone_glow"):
                 continue
-            if mode == 'VOLUME':
-                slot.material = make_cone_volume_material(
-                    slot.material, strength, density)
-            else:
-                slot.material = make_cone_fake_volume_material(
-                    slot.material, strength, falloff)
+            if obj_is_cone or _name_looks_like_light_cone(mat.name):
+                cone_slots.append(slot)
+        if not obj_is_cone and not cone_slots:
+            continue
 
-        o.visible_shadow = False
-        n_done += 1
+        if mode == 'HIDE':
+            # Only hide when the object itself is cone geometry. A single
+            # flare material on a multi-material mesh must not hide the mesh.
+            if obj_is_cone:
+                o.hide_viewport = True
+                o.hide_render = True
+                n_done += 1
+            continue
+
+        converted = 0
+        for slot in cone_slots:
+            slot.material = make_cone_fake_volume_material(
+                slot.material, strength, falloff)
+            converted += 1
+        if converted:
+            # Only disable shadows when the whole object is a cone, or when
+            # every material slot was converted (no solid surface left).
+            solid_left = any(
+                s.material is not None and not s.material.get("pd2_cone_glow")
+                for s in o.material_slots
+            )
+            if obj_is_cone or not solid_left:
+                o.visible_shadow = False
+            n_done += 1
     if n_done:
         vlog(f"  -> light cone geometry: {mode.lower()} applied to "
              f"{n_done} object(s)")
     return n_done
 
 def apply_model_light_defaults(objects, extra_names=()):
-\
-\
-\
-\
 
     n = 0
     n_shadow = 0
@@ -1639,12 +1606,6 @@ def apply_model_light_defaults(objects, extra_names=()):
 
 def create_unit_lights(unit, root, collection, power_scale, unit_objects=None,
                        unit_path=""):
-\
-\
-\
-\
-\
-\
 
     lights_data = unit.get("lights") or {}
 
@@ -1660,15 +1621,6 @@ def create_unit_lights(unit, root, collection, power_scale, unit_objects=None,
     model_light_names = [obj_name for _, obj_name in available]
 
     def find_match(json_name):
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
         want = base_name(json_name).lower()
         tiers = ((lambda bn: bn == want, "model node"),
@@ -1785,10 +1737,6 @@ def create_unit_lights(unit, root, collection, power_scale, unit_objects=None,
     return created
 
 def strip_imported_lights(objects):
-\
-\
-\
-\
 
     light_names = [o.name for o in objects if o.type == 'LIGHT']
     survivor_names = [o.name for o in objects if o.type != 'LIGHT']
@@ -1836,6 +1784,9 @@ _unit_matconfig_re = re.compile(
 _loose_materials_re = re.compile(
     r'\bmaterials\s*=\s*"([^"]+)"', re.IGNORECASE)
 _attr_re = re.compile(r'([A-Za-z_][\w]*)\s*=\s*"([^"]*)"')
+_matconfig_texture_re = re.compile(
+    r'<\s*([A-Za-z_][\w]*)\b[^>]*\b(?:file|src)\s*=\s*"([^"]+)"')
+_matconfig_variable_re = re.compile(r'<\s*variable\b([^>]*)/?>')
 
 _matconfig_cache = {}
 _texture_cache = {}
@@ -1854,20 +1805,6 @@ def _asset_file(assets_dir, diesel_path, exts):
     return None
 
 def find_material_config_for_unit(unit_path, assets_dir):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     ck = (unit_path, assets_dir)
     if ck in _matconfig_for_unit:
@@ -1877,20 +1814,6 @@ def find_material_config_for_unit(unit_path, assets_dir):
     return result
 
 def _find_material_config_uncached(unit_path, assets_dir):
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     if not unit_path:
         return None
@@ -1975,9 +1898,6 @@ def _find_material_config_uncached(unit_path, assets_dir):
     return None
 
 def parse_material_config(mc_path):
-\
-\
-\
 
     cached = _matconfig_cache.get(mc_path)
     if cached is not None:
@@ -1996,15 +1916,12 @@ def parse_material_config(mc_path):
             body = text[m.end():end]
             textures = {}
 
-            for tm in re.finditer(
-                    r'<\s*([A-Za-z_][\w]*)\b[^>]*\b(?:file|src)\s*=\s*"([^"]+)"',
-                    body):
+            for tm in _matconfig_texture_re.finditer(body):
                 slot = tm.group(1).lower()
                 if slot.endswith("_texture") or slot == "texture":
                     textures[slot] = tm.group(2).strip()
             variables = {}
-            for vm in re.finditer(
-                    r'<\s*variable\b([^>]*)/?>', body):
+            for vm in _matconfig_variable_re.finditer(body):
                 va = dict(_attr_re.findall(vm.group(1)))
                 if va.get("name"):
                     variables[va["name"].lower()] = va.get("value", "")
@@ -2024,8 +1941,6 @@ _DXGI_BC = {80: 1, 81: 1, 82: 1,
             83: 2, 84: 2, 85: 2}
 
 def _dds_header(path):
-\
-\
 
     try:
         with open(path, "rb") as f:
@@ -2047,7 +1962,6 @@ def _dds_header(path):
     return fourcc, width, height, 128
 
 def _bc_channel_planes(raw, n_blocks, stride, offset):
-\
 
     import numpy as np
     buf = np.frombuffer(raw, dtype=np.uint8,
@@ -2087,9 +2001,6 @@ def _blocks_to_image(planes, bw, bh, width, height):
 _reported_dds_formats = set()
 
 def _report_dds_format(path):
-\
-\
-\
 
     try:
         with open(path, "rb") as f:
@@ -2113,10 +2024,6 @@ def _report_dds_format(path):
         + (f" dxgiFormat={dxgi}" if dxgi is not None else ""))
 
 def _decode_bc45_texture(src, channels, allow_bpy=True):
-\
-\
-\
-\
 
     info = _dds_header(src)
     if info is None:
@@ -2170,6 +2077,16 @@ def _decode_bc45_texture(src, channels, allow_bpy=True):
         rgba_u8[..., 2] = np.clip((nz * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
         rgba_u8[..., 3] = 255
 
+        # rgba_u8 is decoded in standard raster order (row 0 = top), which
+        # is what a PNG file on disk should contain and what
+        # bpy.data.images.load() expects when this file is read back in
+        # _load_texture(). The PIL branch writes it directly. Blender's
+        # *in-memory* img.pixels buffer is bottom-to-top though, so the
+        # bpy fallback below flips going in -- img.save() then writes that
+        # buffer out to a standard top-to-bottom PNG, netting no flip
+        # relative to the PIL path. Both branches write the same
+        # content-hash-cached png_path, so this equivalence matters: don't
+        # remove the flip below without also changing the PIL branch.
         written = False
         try:
             from PIL import Image as _PILImage
@@ -2182,7 +2099,7 @@ def _decode_bc45_texture(src, channels, allow_bpy=True):
                 return None
 
             try:
-                rgba = (rgba_u8.astype(np.float32) / 255.0)[::-1]
+                rgba = (rgba_u8.astype(np.float32) / 255.0)[::-1]  # flip into bpy's bottom-to-top buffer
                 img = bpy.data.images.new(
                     os.path.basename(png_path), width, height,
                     alpha=False, float_buffer=False)
@@ -2190,7 +2107,7 @@ def _decode_bc45_texture(src, channels, allow_bpy=True):
                 img.pixels.foreach_set(rgba.ravel())
                 img.filepath_raw = png_path
                 img.file_format = "PNG"
-                img.save()
+                img.save()  # writes buffer back out top-to-bottom -- matches the PIL branch above
                 bpy.data.images.remove(img)
                 written = True
             except Exception as e:
@@ -2203,8 +2120,6 @@ def _decode_bc45_texture(src, channels, allow_bpy=True):
         return None
 
 def _ensure_texture_on_disk(diesel_path, assets_dir):
-\
-\
 
     src = _asset_file(assets_dir, diesel_path, TEXTURE_EXTS)
     if not src:
@@ -2230,7 +2145,6 @@ def _ensure_texture_on_disk(diesel_path, assets_dir):
     return load_path
 
 def collect_texture_paths_for_units(unit_paths, assets_dir):
-\
 
     paths = set()
     for up in unit_paths:
@@ -2270,8 +2184,6 @@ def prefetch_textures_parallel(diesel_paths, assets_dir, max_workers=4):
     return ok, failed
 
 def _load_texture(diesel_path, assets_dir, is_color):
-\
-\
 
     key = (diesel_path.lower(), bool(is_color))
     if key in _texture_cache:
@@ -2323,8 +2235,6 @@ def _load_texture(diesel_path, assets_dir, is_color):
     return img
 
 def _is_cubemap_strip(diesel_path, assets_dir):
-\
-\
 
     src = _asset_file(assets_dir, diesel_path, TEXTURE_EXTS)
     if not src:
@@ -2347,10 +2257,6 @@ def _is_cubemap_strip(diesel_path, assets_dir):
 _DXT5_FOURCC = b"DXT5"
 
 def _detect_normal_mode(img):
-\
-\
-\
-\
 
     if img is None:
         return (1.0, 1.0)
@@ -2386,19 +2292,6 @@ def _ng_new_node(ng, type_, x, y, **props):
     return n
 
 def get_pd2_node_group():
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
 
     ng = bpy.data.node_groups.get(PD2_NODE_GROUP_NAME)
     if ng is not None:
@@ -2687,11 +2580,43 @@ def get_pd2_node_group():
     links.new(mix_sh.outputs["Shader"], go.inputs["BSDF"])
     return ng
 
-IGNORED_FLAG_PREFIXES = ("RL_", "SKINNED_", "CONTOUR", "DEPTH_SCALING",
-                         "VERTEX_COLOR")
+# Runtime / engine-only flag prefixes that never drive the Blender shader.
+# Do NOT put real shading flags here (VERTEX_COLOR, SELF_ILLUMINATION,
+# NORMALMAP, ALPHA_*, CUBE_*, BLEND_*, etc.) — startswith matching would
+# drop them and silently disable those features.
+IGNORED_FLAG_PREFIXES = (
+    "RL_",           # RL_CORE_ENVIRONMENT, RL_*, etc.
+    "SKINNED_",      # skinning / bone runtime
+    "CONTOUR",       # outline pass
+    "DEPTH_SCALING", # depth-only helpers
+)
+
+# Shading feature flags we care about — kept for documentation / tests.
+MATERIAL_FEATURE_FLAGS = (
+    "SELF_ILLUMINATION", "SELF_ILLUMINATION_BLOOM",
+    "NORMALMAP", "OPACITY_TEXTURE", "ALPHA_MASKED", "ALPHA_MASKING",
+    "GSMA_ALPHA_MASKING", "CUBE_ENVIRONMENT_MAPPING",
+    "GLOBAL_ENVIRONMENT_MAPPING", "VERTEX_COLOR", "BLUE_MASK_TINT",
+    "SIMPLE_TINT", "BLEND_DIFFUSE", "BLEND_MUL", "BLEND_MASK_SEPERATE",
+    "BLEND_GSMA", "BLEND_NORMAL", "DOUBLE_SIDED", "DIFFUSE_TEXTURE",
+    "DIFFUSE0_TEXTURE",
+)
 
 def _template_flags(render_template):
-    return set(f for f in render_template.split(":") if f)
+    """Split a diesel render_template into flags.
+
+    Drops engine-only noise (RL_*, SKINNED_*, …) so a template like
+    generic:DIFFUSE_TEXTURE:NORMALMAP:RL_CORE_ENVIRONMENT:SELF_ILLUMINATION
+    still exposes SELF_ILLUMINATION, NORMALMAP, DIFFUSE_TEXTURE, etc.
+    """
+    out = set()
+    for f in render_template.split(":"):
+        if not f:
+            continue
+        if any(f.startswith(p) for p in IGNORED_FLAG_PREFIXES):
+            continue
+        out.add(f)
+    return out
 
 TINT_SATURATION_BOOST = 1.5
 
@@ -2713,12 +2638,6 @@ def _boost_saturation(rgb, mult=TINT_SATURATION_BOOST):
     return (r, g, b, 1.0)
 
 def make_color_mix(nt, blend_type='MIX', location=(0, 0), label=""):
-\
-\
-\
-\
-\
-\
 
     try:
         n = nt.nodes.new('ShaderNodeMix')
@@ -2749,8 +2668,48 @@ def make_color_mix(nt, blend_type='MIX', location=(0, 0), label=""):
         n.label = label
     return n, fac, a_sock, b_sock, res
 
+
+INVERTED_OPACITY_NAME_HINTS = (
+    "mullplan", "mullplane", "mull_plane", "mullion", "mullions",
+    "window_bar", "windowbar", "grille", "grating_mask",
+)
+
+def _looks_like_inverted_opacity(mat_name, textures, base=""):
+    """True for masks where white = transparent and black = opaque
+    (opposite of a normal alpha channel). Common on PD2 mullion/mullplane
+    window-bar textures that ship as a diffuse (_df) with no alpha."""
+    def hit(text):
+        if not text:
+            return False
+        low = str(text).lower().replace("\\", "/")
+        return any(h in low for h in INVERTED_OPACITY_NAME_HINTS)
+    if hit(mat_name):
+        return True
+    for tpath in (textures or {}).values():
+        if hit(tpath):
+            return True
+    # Some opacity-template materials use the diffuse as an inverted mask
+    # even without "mull" in the name when the texture path says so.
+    return False
+
+
+def _wire_inverted_opacity(nt, color_socket, grp, location_y=0):
+    """color_socket -> BW -> invert (1 - v) -> Opacity. Returns the invert node."""
+    bw = nt.nodes.new('ShaderNodeRGBToBW')
+    bw.location = (220, location_y + 80)
+    bw.label = "Mask luminance"
+    nt.links.new(color_socket, bw.inputs["Color"])
+    inv = nt.nodes.new('ShaderNodeMath')
+    inv.operation = 'SUBTRACT'
+    inv.location = (220, location_y - 20)
+    inv.label = "Invert (white=transparent)"
+    inv.inputs[0].default_value = 1.0
+    nt.links.new(bw.outputs["Val"], inv.inputs[1])
+    nt.links.new(inv.outputs[0], grp.inputs["Opacity"])
+    return inv
+
+
 def rebuild_pd2_material(mat, mat_info, assets_dir):
-\
 
     tpl = mat_info.get("render_template", "") or ""
     flags = _template_flags(tpl)
@@ -2776,12 +2735,57 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
                    if "BLEND_GSMA" in flags else None)
     blend_normal2 = (textures.get("normal_layer0_texture")
                      if "BLEND_NORMAL" in flags else None)
-    is_mul_effect = (base == "effect" and "BLEND_MUL" in flags)
+    is_mul_effect = ("BLEND_MUL" in flags)
     is_additive_effect = (base == "effect" and not is_mul_effect)
 
     mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
+
+    # BLEND_MUL (mullplanes, multiply-blend effects): simple transparent
+    # setup matching the engine — the diffuse texture's own color drives
+    # Transparent BSDF color directly (white = see-through, black = solid
+    # bars), decoded as sRGB rather than read as raw luminance data.
+    if is_mul_effect:
+        out = nt.nodes.new('ShaderNodeOutputMaterial')
+        out.location = (700, 0)
+
+        tex_path = (textures.get("diffuse_texture")
+                    or textures.get("diffuse0_texture")
+                    or textures.get("diffuse_layer0_texture")
+                    or textures.get("opacity_texture"))
+        img = _load_texture(tex_path, assets_dir, is_color=True) if tex_path else None
+
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.location = (-220, 0)
+        tex.label = "BLEND_MUL diffuse"
+        if img is not None:
+            tex.image = img
+
+        transp = nt.nodes.new('ShaderNodeBsdfTransparent')
+        transp.location = (60, 0)
+        nt.links.new(tex.outputs["Color"], transp.inputs["Color"])
+        nt.links.new(transp.outputs["BSDF"], out.inputs["Surface"])
+
+        if hasattr(mat, "blend_method"):
+            mat.blend_method = 'BLEND'
+        if hasattr(mat, "surface_render_method"):
+            mat.surface_render_method = 'BLENDED'
+        if hasattr(mat, "shadow_method"):
+            mat.shadow_method = 'NONE'
+        mat.use_backface_culling = False
+        if hasattr(mat, "show_transparent_back"):
+            mat.show_transparent_back = True
+
+        mat["pd2_render_template"] = tpl
+        mat["pd2_variables"] = {str(k): str(v) for k, v in variables.items()}
+        mat["pd2_textured"] = True
+        mat["pd2_tex_sig"] = material_signature(mat_info)
+        mat["pd2_blend_mul"] = True
+        vlog(f"  BLEND_MUL '{mat.name}': "
+             f"tex={os.path.basename(tex_path) if tex_path else 'none'}")
+        return
+
     out = nt.nodes.new('ShaderNodeOutputMaterial')
     out.location = (700, 0)
     grp = nt.nodes.new('ShaderNodeGroup')
@@ -2855,7 +2859,6 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
             f"B={os.path.basename(diffuse or '-')}")
 
     def blended(sock_name, base_path, layer_path, is_color, label):
-\
 
         n_base = n_layer = None
         img_base = (_load_texture(base_path, assets_dir, is_color)
@@ -2908,50 +2911,66 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
             nt.links.new(v_res, grp.inputs["Diffuse"])
         if n:
             if is_additive_effect:
-
-                bw = nt.nodes.new('ShaderNodeRGBToBW')
-                bw.location = (220, n.location.y + 120)
-                nt.links.new(n.outputs["Color"], bw.inputs["Color"])
-                nt.links.new(bw.outputs["Val"], grp.inputs["Opacity"])
-            elif is_mul_effect:
-
-                bw = nt.nodes.new('ShaderNodeRGBToBW')
-                bw.location = (220, n.location.y + 160)
-                nt.links.new(n.outputs["Color"], bw.inputs["Color"])
-                inv = nt.nodes.new('ShaderNodeMath')
-                inv.operation = 'SUBTRACT'
-                inv.inputs[0].default_value = 1.0
-                inv.location = (220, n.location.y + 60)
-                inv.label = "Inverted alpha (white = empty)"
-                nt.links.new(bw.outputs["Val"], inv.inputs[1])
-
-                inten = variables.get("intensity", "")
-                try:
-                    power = float(inten)
-                except (TypeError, ValueError):
-                    power = 1.0
-                pw = nt.nodes.new('ShaderNodeMath')
-                pw.operation = 'MULTIPLY'
-                pw.use_clamp = True
-                pw.location = (400, n.location.y + 60)
-                pw.label = "Opacity power (intensity)"
-                pw.inputs[1].default_value = max(power, 0.0)
-                nt.links.new(inv.outputs[0], pw.inputs[0])
-                nt.links.new(pw.outputs[0], grp.inputs["Opacity"])
-                grp.inputs["Specular Strength"].default_value = 0.0
+                # effect:* (e.g. effect:DIFFUSE0_TEXTURE:VIEW_ANGLE_FALLOFF_OP)
+                # — opacity from the diffuse texture's alpha channel, not
+                # color luminance. Still additive/self-illum later.
+                nt.links.new(n.outputs["Alpha"], grp.inputs["Diffuse Alpha"])
+                nt.links.new(n.outputs["Alpha"], grp.inputs["Opacity"])
+                grp.inputs["Alpha Direct"].default_value = 1.0
+                grp.inputs["Fresnel Strength"].default_value = 0.0
+                vlog(f"  effect '{mat.name}': opacity from diffuse alpha")
             else:
                 nt.links.new(n.outputs["Alpha"], grp.inputs["Diffuse Alpha"])
+                if base == "decal":
+                    # decal:* — opacity is the diffuse alpha channel
+                    nt.links.new(n.outputs["Alpha"], grp.inputs["Opacity"])
+                    grp.inputs["Alpha Direct"].default_value = 1.0
+                    grp.inputs["Fresnel Strength"].default_value = 0.0
+                    vlog(f"  decal '{mat.name}': opacity from diffuse alpha")
             has_alpha_source = True
 
+    # Detect inverted opacity masks (mullplanes etc.): white = transparent.
+    # Skip for decal templates — those use the diffuse alpha channel instead
+    # (e.g. decal:DIFFUSE_TEXTURE), even if the texture name contains "mull".
+    invert_opacity = (
+        base != "decal"
+        and _looks_like_inverted_opacity(mat.name, textures, base)
+    )
+
     has_opacity_tex = False
+    opacity_tex_node = None
     if opacity:
         img = _load_texture(opacity, assets_dir, is_color=False)
         if img:
-            n = add_tex(img, "Opacity")
-
-            nt.links.new(n.outputs["Color"], grp.inputs["Opacity"])
+            n = add_tex(img, "Opacity (inverted)" if invert_opacity else "Opacity")
+            opacity_tex_node = n
+            if invert_opacity:
+                _wire_inverted_opacity(nt, n.outputs["Color"], grp,
+                                       location_y=n.location.y)
+                # Straight alpha — no glass fresnel on window bars
+                grp.inputs["Alpha Direct"].default_value = 1.0
+                grp.inputs["Fresnel Strength"].default_value = 0.0
+                vlog(f"  inverted opacity '{mat.name}': white=transparent")
+            else:
+                nt.links.new(n.outputs["Color"], grp.inputs["Opacity"])
             has_alpha_source = True
             has_opacity_tex = True
+
+    # Mullplanes often only ship a diffuse (_df) with no opacity_texture and
+    # no alpha channel — the diffuse luminance *is* the inverted mask.
+    if invert_opacity and not has_opacity_tex and diffuse:
+        img = _load_texture(diffuse, assets_dir, is_color=False)
+        if img:
+            n = add_tex(img, "Mullplane mask (inverted)")
+            opacity_tex_node = n
+            _wire_inverted_opacity(nt, n.outputs["Color"], grp,
+                                   location_y=n.location.y)
+            grp.inputs["Alpha Direct"].default_value = 1.0
+            grp.inputs["Fresnel Strength"].default_value = 0.0
+            has_alpha_source = True
+            has_opacity_tex = True
+            vlog(f"  inverted diffuse-as-opacity '{mat.name}': "
+                 f"white=transparent")
 
     has_gsma = False
     if gsma or blend_gsma2:
@@ -3163,9 +3182,25 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
             img = _load_texture(self_illum, assets_dir, is_color=True)
             if img:
                 n = add_tex(img, "Self Illumination")
-
+                # Emission Color in the PD2 group = Diffuse * Illum Tint.
+                # Drive Illum Tint from the self-illumination texture so
+                # glowing regions emit; black regions stay dark.
+                # If il_tint is also set, multiply texture * tint colour.
+                if len(ilt) >= 3:
+                    _tm, t_fac, t_a, t_b, t_res = make_color_mix(
+                        nt, 'MULTIPLY', (240, n.location.y),
+                        "Self Illum x Tint")
+                    t_fac.default_value = 1.0
+                    nt.links.new(n.outputs["Color"], t_a)
+                    t_b.default_value = (ilt[0], ilt[1], ilt[2], 1.0)
+                    nt.links.new(t_res, grp.inputs["Illum Tint"])
+                else:
+                    nt.links.new(n.outputs["Color"], grp.inputs["Illum Tint"])
+                # No diffuse at all: use the illum map as the surface colour too
                 if not diffuse:
                     nt.links.new(n.outputs["Color"], grp.inputs["Diffuse"])
+                vlog(f"  self-illum '{mat.name}': texture -> Illum Tint "
+                     f"(strength={grp.inputs['Self Illumination'].default_value:g})")
 
     def _set_render_method(m, method):
 
@@ -3211,11 +3246,18 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
         if hasattr(mat, "use_screen_refraction"):
             mat.use_screen_refraction = True
     elif (base == "decal" or "OPACITY_TEXTURE" in flags
-          or "GSMA_ALPHA_MASKING" in flags):
-        if has_alpha_source or has_gsma:
+          or "GSMA_ALPHA_MASKING" in flags
+          or "ALPHA_MASKING" in flags):
+        # decal:* — opacity from diffuse alpha; fully matte (no spec/gloss)
+        if has_alpha_source or has_gsma or diffuse:
             alpha_mode = 2.0
             _set_blend_method(mat, 'BLEND')
             _set_render_method(mat, 'BLENDED')
+            if hasattr(mat, "shadow_method"):
+                mat.shadow_method = 'NONE'
+            grp.inputs["Fresnel Strength"].default_value = 0.0
+            grp.inputs["Alpha Direct"].default_value = 1.0
+            vlog(f"  '{mat.name}' ({base}): opacity from diffuse alpha")
 
     fs = _var_floats("fresnel_settings")
 
@@ -3235,22 +3277,90 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
         grp.inputs["Fresnel Strength"].default_value = GLASS_FRESNEL
 
     if base == "generic" and has_opacity_tex:
+        # generic + opacity texture: dithered (not soft-blended) so the
+        # mask reads as a hard silhouette without sorting artefacts.
         grp.inputs["Alpha Direct"].default_value = 1.0
         grp.inputs["Fresnel Strength"].default_value = 0.0
-        alpha_mode = 2.0
-        _set_blend_method(mat, 'BLEND')
-        _set_render_method(mat, 'BLENDED')
-        vlog(f"  generic+opacity '{mat.name}': opacity wired straight "
-             f"to Alpha")
+        alpha_mode = 1.0
+        ar = _var_floats("alpha_ref")
+        clip = min(max(ar[0], 0.0), 1.0) if ar else 0.15
+        grp.inputs["Clip Threshold"].default_value = clip
+        _set_blend_method(mat, 'CLIP')
+        if hasattr(mat, "alpha_threshold"):
+            mat.alpha_threshold = clip
+        _set_render_method(mat, 'DITHERED')
+        vlog(f"  generic+opacity '{mat.name}': dithered clip "
+             f"(threshold={clip:g})")
 
     if has_opacity_tex and alpha_mode == 0.0:
 
         alpha_mode = 2.0
         _set_blend_method(mat, 'BLEND')
         _set_render_method(mat, 'BLENDED')
+    if invert_opacity:
+        # Window bars / mullplanes: soft blended alpha, no shadows, no glass
+        alpha_mode = 2.0
+        _set_blend_method(mat, 'BLEND')
+        _set_render_method(mat, 'BLENDED')
+        if hasattr(mat, "shadow_method"):
+            mat.shadow_method = 'NONE'
+        grp.inputs["Alpha Direct"].default_value = 1.0
+        grp.inputs["Fresnel Strength"].default_value = 0.0
     grp.inputs["Alpha Mode"].default_value = alpha_mode
 
-    if not has_gsma and alpha_mode == 0.0 and diffuse:
+    # Any render template starting with "decal" is a flat projected
+    # surface (shadows, dirt, letters, etc.) — fully matte, no gloss.
+    if base == "decal":
+        grp.inputs["Base Roughness"].default_value = 1.0
+        grp.inputs["Specular Strength"].default_value = 0.0
+        grp.inputs["Gloss Boost"].default_value = 1.0
+        grp.inputs["Spec From Diffuse Alpha"].default_value = 0.0
+        grp.inputs["Metallic"].default_value = 0.0
+        grp.inputs["Cube Reflection"].default_value = 0.0
+        vlog(f"  decal '{mat.name}': forced matte (rough=1, spec=0)")
+
+    # opacity:CUBE_ENVIRONMENT_MAPPING:CUBE_FRESNEL:DIFFUSE_TEXTURE and
+    # templates starting with opacity:SHADERS (and similar opacity+CUBE
+    # fresnel variants): fully rough, unit gloss/spec, and drive specular
+    # strength from the opacity texture's blue channel.
+    tpl_upper = (tpl or "").upper()
+    opacity_spec_from_blue = (
+        base == "opacity"
+        and (
+            tpl_upper.startswith("OPACITY:SHADERS")
+            or "CUBE_FRESNEL" in flags
+            or (
+                "CUBE_ENVIRONMENT_MAPPING" in flags
+                and "DIFFUSE_TEXTURE" in flags
+            )
+            or tpl_upper.startswith(
+                "OPACITY:CUBE_ENVIRONMENT_MAPPING:CUBE_FRESNEL:DIFFUSE_TEXTURE")
+        )
+    )
+    if opacity_spec_from_blue:
+        grp.inputs["Base Roughness"].default_value = 1.0
+        grp.inputs["Gloss Boost"].default_value = 1.0
+        grp.inputs["Specular Strength"].default_value = 1.0
+        grp.inputs["Spec From Diffuse Alpha"].default_value = 0.0
+        if opacity_tex_node is not None:
+            osep = nt.nodes.new('ShaderNodeSeparateColor')
+            osep.location = (220, opacity_tex_node.location.y - 160)
+            osep.label = "Opacity Blue → Spec"
+            try:
+                osep.mode = 'RGB'
+            except (AttributeError, TypeError):
+                pass
+            nt.links.new(opacity_tex_node.outputs["Color"],
+                         osep.inputs["Color"])
+            nt.links.new(osep.outputs["Blue"],
+                         grp.inputs["Specular Strength"])
+            vlog(f"  opacity spec '{mat.name}': rough=1 gloss=1, "
+                 f"specular from opacity blue")
+        else:
+            vlog(f"  opacity spec '{mat.name}': rough=1 gloss=1 "
+                 f"spec=1 (no opacity tex for blue channel)")
+
+    if not has_gsma and alpha_mode == 0.0 and diffuse and base != "decal":
         grp.inputs["Spec From Diffuse Alpha"].default_value = 1.0
 
     if "DOUBLE_SIDED" in flags:
@@ -3264,8 +3374,6 @@ def rebuild_pd2_material(mat, mat_info, assets_dir):
     mat["pd2_tex_sig"] = material_signature(mat_info)
 
 def material_signature(mat_info):
-\
-\
 
     tex = sorted((k, v) for k, v in (mat_info.get("textures") or {}).items())
     # <variable> entries (tint_color, il_tint, blend_control, etc.) affect
@@ -3276,16 +3384,16 @@ def material_signature(mat_info):
     # material sharing that signature would be skipped as unchanged on
     # every later rebuild, silently never getting its own tint applied.
     var = sorted((k, v) for k, v in (mat_info.get("variables") or {}).items())
-    payload = (mat_info.get("render_template", "") + "|"
+    # Bump SHADER_PATH_VER when rebuild logic changes so existing materials
+    # are rebuilt on re-apply instead of being skipped as "unchanged".
+    SHADER_PATH_VER = "9"
+    payload = (SHADER_PATH_VER + "|"
+               + mat_info.get("render_template", "") + "|"
                + "|".join(f"{k}={v}" for k, v in tex) + "|"
                + "|".join(f"{k}={v}" for k, v in var))
     return f"{diesel_hash(payload):016x}"
 
 def apply_pd2_materials(objects, unit_path, assets_dir):
-\
-\
-\
-\
 
     mc_path = find_material_config_for_unit(unit_path, assets_dir)
     if not mc_path:
@@ -3504,7 +3612,6 @@ def _cached_cache_stats(force=False):
     return _cache_stats[1], _cache_stats[2]
 
 class PD2_OT_clear_glb_cache(Operator):
-\
 
     bl_idname = "pd2_importer.clear_glb_cache"
     bl_label = "Clear Conversion Cache"
@@ -3513,7 +3620,7 @@ class PD2_OT_clear_glb_cache(Operator):
         n = 0
         size = 0
 
-        for dirname in (GLB_CACHE_DIRNAME, TEX_CACHE_DIRNAME):
+        for dirname in (GLB_CACHE_DIRNAME, TEX_CACHE_DIRNAME, MAT_CACHE_DIRNAME):
             d = os.path.join(tempfile.gettempdir(), dirname)
             if not os.path.isdir(d):
                 continue
@@ -3621,6 +3728,28 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         default=True,
     )
 
+    scan_extra_continents: BoolProperty(
+        name="Scan & Import Extra Continents",
+        description=("After the main level, scan only one directory up from "
+                     "the level folder (e.g. revenge/ when the JSON is in "
+                     "revenge/world/) for additional .continent files. "
+                     "Skips editor_only, collision, occluder, shadow_caster, "
+                     "mockup, etc. and any file under 1 KB. Does not scan "
+                     "the full assets tree"),
+        default=False,
+    )
+
+    defer_materials: BoolProperty(
+        name="Secondary Material Pass",
+        description=("After the main import, run an extra pass that rebuilds "
+                     "materials on any remaining meshes that still lack PD2 "
+                     "textures (e.g. edge cases outside the prototype path). "
+                     "Primary material rebuild always happens on prototypes "
+                     "after mesh filtering, so deleted/stripped meshes never "
+                     "receive texture work. Safe to leave on"),
+        default=True,
+    )
+
     fast_import: BoolProperty(
         name="Fast Import (defer viewport updates)",
         description=("Hide the level collection from the view layer while "
@@ -3651,9 +3780,6 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
              "Additive surface that fades towards its silhouette to mimic "
              "looking through fog. Uses the texture's real UVs and costs "
              "almost nothing to render"),
-            ('VOLUME', "True volumetric",
-             "Shade the cone mesh as actual fog. Heavier, and the texture "
-             "has to fall back to Generated coordinates"),
             ('HIDE', "Hide",
              "Keep the objects but hide them in the viewport and renders"),
             ('KEEP', "Leave as imported",
@@ -3683,13 +3809,6 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                      "silhouette. 1 is a soft even wash, higher values pull "
                      "the glow into the middle of the shaft"),
         default=1.6, min=0.1, soft_max=8.0,
-    )
-
-    light_cone_density: FloatProperty(
-        name="Light Cone Density",
-        description=("Fog density for volumetric light cones. Lower reads "
-                     "as a thin haze, higher as a solid beam"),
-        default=1.0, min=0.0, soft_max=10.0,
     )
 
     only_g_meshes: BoolProperty(
@@ -3835,6 +3954,96 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
             else:
                 log("No massunit file found — skipping scatter import")
 
+        # Optional scan for extra .continent files: only one directory up
+        # from the level folder. The level's own folder (e.g. .../world/)
+        # is excluded so its world.continent is never re-imported on top of
+        # the main JSON statics. One continent per folder; paths already
+        # imported via the level JSON instances are also skipped.
+        if self.scan_extra_continents:
+            load_hashlist(parser_exe)
+            level_dir = os.path.dirname(os.path.abspath(self.filepath))
+            parent_dir = os.path.dirname(level_dir)
+            scan_roots = []
+            if os.path.isdir(parent_dir):
+                scan_roots.append(parent_dir)   # one directory up
+            # Do NOT fall back to scanning level_dir — that is the main
+            # level and is already represented by the JSON statics.
+
+            # Paths already covered by the level JSON's instances section
+            already_imported = {
+                g["source"] for g in inst_groups if g.get("source")
+            }
+            # Also skip any .continent sitting in the level folder itself
+            # (world.continent next to the JSON is the source of the main import)
+            if os.path.isdir(level_dir):
+                try:
+                    for fn in os.listdir(level_dir):
+                        if fn.lower().endswith(".continent"):
+                            already_imported.add(os.path.normcase(
+                                os.path.abspath(os.path.join(level_dir, fn))))
+                except OSError:
+                    pass
+
+            seen_cont = set(already_imported)
+            extra_found = []
+            for root in scan_roots:
+                for p in scan_additional_continents(
+                        root,
+                        skip_paths=already_imported,
+                        exclude_dirs=[level_dir]):
+                    key = os.path.normcase(os.path.abspath(p))
+                    if key in seen_cont:
+                        continue
+                    seen_cont.add(key)
+                    extra_found.append(p)
+
+            if extra_found:
+                log(f"Extra continent scan: {len(extra_found)} unique "
+                    f"file(s) (skipped {len(already_imported)} already "
+                    f"imported)")
+                synthetic = []
+                for i, p in enumerate(extra_found):
+                    abs_assets = os.path.abspath(assets_dir)
+                    if os.path.normcase(p).startswith(os.path.normcase(abs_assets)):
+                        rel = os.path.relpath(p, abs_assets)
+                    else:
+                        rel = os.path.basename(p)
+                    # folder for lookup: directory of the continent, or
+                    # path without extension if the file is named after
+                    # the folder (e.g. room.continent beside room/)
+                    folder = os.path.splitext(rel)[0].replace(os.sep, "/")
+                    synthetic.append({
+                        "id": f"extra_{i}",
+                        "folder": folder,
+                        "name": f"extra_{os.path.splitext(os.path.basename(p))[0]}",
+                        "position": (0.0, 0.0, 0.0),
+                        "rotation": (0.0, 0.0, 0.0),
+                        "continent": "",
+                        "mission_placed": False,
+                        "script": "",
+                    })
+                extra_groups = collect_instance_units(synthetic, assets_dir)
+                # Final dedupe: drop groups whose resolved source was
+                # already imported (candidate resolution can alias paths)
+                new_groups = []
+                for g in extra_groups:
+                    src = g.get("source")
+                    if src and src in already_imported:
+                        log(f"  skipping duplicate continent: {src}")
+                        continue
+                    if src:
+                        already_imported.add(src)
+                    new_groups.append(g)
+                if new_groups:
+                    log(f"  -> {sum(len(g['units']) for g in new_groups)} "
+                        f"units from {len(new_groups)} extra continent(s)")
+                    inst_groups.extend(new_groups)
+                    n_inst_units = sum(len(g["units"]) for g in inst_groups)
+                else:
+                    log("Extra continent scan: all candidates were duplicates")
+            else:
+                log("Extra continent scan: nothing new found")
+
         level_name = os.path.splitext(os.path.basename(self.filepath))[0]
         level_col = bpy.data.collections.new(level_name)
         context.scene.collection.children.link(level_col)
@@ -3851,6 +4060,29 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         unique_paths = list(dict.fromkeys(all_paths))
         log(f"{len(units)} units + {n_inst_units} instance units -> "
             f"{len(unique_paths)} unique models")
+
+        # Which unique paths actually need a real, reusable prototype built
+        # (import once + filter once + rebuild materials once, then cheaply
+        # duplicated for every placement)? Instance-group and massunit
+        # placement ALWAYS instance from a prototype, regardless of the
+        # "Instance Repeated Models" setting below -- only the main `units`
+        # list's placement loop branches on that option. When it's off,
+        # every main-list placement does a fully independent, fresh
+        # import+filter+material-rebuild (see the placement loop further
+        # down) -- so pre-building a prototype for a path used *only* by
+        # the main list would import and rebuild materials for that model
+        # twice for nothing: once here (immediately discarded, since
+        # duplicate_objects() is never called on it), and once more for
+        # every actual placement. Paths also used by an instance group or
+        # a massunit still get pre-built here as before, since those two
+        # placement loops unconditionally need a real prototype to
+        # duplicate from.
+        paths_needing_prototype = set()
+        if self.instance_repeats:
+            paths_needing_prototype.update(u["path"] for u in units)
+        paths_needing_prototype.update(
+            iu["path"] for g in inst_groups for iu in g["units"])
+        paths_needing_prototype.update(mi["path"] for mi in mass_instances)
 
         wm = context.window_manager
 
@@ -3885,10 +4117,23 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         try:
 
             t0 = time.time()
+            # Throttled: wm.progress_update() forces a UI/window-manager
+            # tick, and this callback fires once per completed conversion
+            # job. With hundreds of unique models that's hundreds of redraw
+            # ticks stealing time from the main thread while the parallel
+            # workers are the ones doing the actual work -- updating at
+            # most ~20x/sec (or always on the last job) keeps the bar
+            # responsive without taxing the conversion pass itself.
+            _last_prog_update = [0.0]
+            def _throttled_progress(d, n):
+                now = time.time()
+                if d >= n or now - _last_prog_update[0] >= 0.05:
+                    _last_prog_update[0] = now
+                    wm.progress_update(d)
             glb_map, conv_missing = convert_all_models_parallel(
                 parser_exe, unique_paths, assets_dir, tmp_dir,
                 max_workers=self.parallel_workers,
-                progress_cb=lambda d, n: wm.progress_update(d),
+                progress_cb=_throttled_progress,
                 low_priority=self.low_cpu_priority,
                 use_cache=self.use_conversion_cache)
             missing |= conv_missing
@@ -3918,10 +4163,6 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                 return objs
 
             def _import_prototype(path):
-\
-\
-\
-\
 
                 glb_path = glb_map.get(path)
                 if glb_path is None:
@@ -3945,12 +4186,15 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                         no_geometry.add(path)
                         vlog(f"  -> all meshes in {path} used a stripped "
                              f"material; unit will be placed as an empty")
+                # Filters run first so stripped/deleted meshes never get
+                # material work. Materials are applied on the prototype so
+                # linked duplicates (instance_repeats) share the rebuilt
+                # materials correctly.
                 if self.import_textures and objs:
                     apply_pd2_materials(objs, path, assets_dir)
                 if objs:
                     apply_light_cone_mode(objs, self.light_cone_mode,
                                           self.light_cone_strength,
-                                          self.light_cone_density,
                                           self.light_cone_falloff)
 
                 prototypes[path] = [o.name for o in objs]
@@ -3966,14 +4210,21 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                 return _import_prototype(path)
 
             t0 = time.time()
-            n_proto_total = sum(1 for p in unique_paths if p not in missing)
+            proto_paths = [p for p in unique_paths if p in paths_needing_prototype]
+            n_proto_total = sum(1 for p in proto_paths if p not in missing)
             n_proto_done = 0
-            for pi, path in enumerate(unique_paths, 1):
+            n_proto_skipped = len(unique_paths) - len(proto_paths)
+            if n_proto_skipped:
+                log(f"{n_proto_skipped} unique model(s) used only by the "
+                    f"main unit list with instancing off -- these import "
+                    f"fresh per-placement below instead of pre-building a "
+                    f"prototype that would never be reused")
+            for pi, path in enumerate(proto_paths, 1):
                 if path not in missing:
                     if _import_prototype(path) is None:
                         n_failed += 1
                     n_proto_done += 1
-                if pi % 25 == 0 or pi == len(unique_paths):
+                if pi % 25 == 0 or pi == len(proto_paths):
                     elapsed_p = time.time() - t0
                     if n_proto_done > 0 and n_proto_done < n_proto_total:
                         rate = elapsed_p / n_proto_done
@@ -3988,7 +4239,7 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
 
             _prog_base = len(unique_paths)
             for i, unit in enumerate(units, 1):
-                if i == 1 or i == len(units) or i % 25 == 0:
+                if i == 1 or i == len(units) or i % 50 == 0:
                     wm.progress_update(_prog_base + i)
                 path = unit["path"]
                 name_id = unit["name_id"]
@@ -4004,9 +4255,9 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                     if self.verbose_log:
                         log("  -> known missing/failed, skipping")
                 else:
-                    protos = get_prototype(path)
-                    if protos:
-                        if self.instance_repeats:
+                    if self.instance_repeats:
+                        protos = get_prototype(path)
+                        if protos:
                             try:
                                 new_objects = duplicate_objects(protos, level_col)
                             except ReferenceError:
@@ -4016,28 +4267,35 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                                 protos = get_prototype(path)
                                 new_objects = (duplicate_objects(protos, level_col)
                                                if protos else [])
-                        else:
-
-                            new_objects = import_glb(glb_map[path], level_col)
-                            if new_objects:
-                                stamp_light_shadow_flags(new_objects)
-                            if self.only_g_meshes and new_objects:
-                                new_objects = filter_g_meshes(new_objects)
-                                if not new_objects:
-                                    no_geometry.add(path)
-                            if self.strip_material_meshes and new_objects:
-                                new_objects = filter_material_meshes(new_objects)
-                                if not new_objects:
-                                    no_geometry.add(path)
-                            if new_objects:
-                                apply_light_cone_mode(
-                                    new_objects, self.light_cone_mode,
-                                    self.light_cone_strength,
-                                    self.light_cone_density,
-                                    self.light_cone_falloff)
-                            if self.import_textures and new_objects:
-                                apply_pd2_materials(new_objects, path,
-                                                    assets_dir)
+                    else:
+                        # No instancing: every placement is a fully
+                        # independent import -- that's what this option
+                        # means -- so get_prototype()/protos is skipped
+                        # entirely here rather than building a prototype
+                        # that would immediately be thrown away unused.
+                        # glb_map[path] is guaranteed present: `missing`
+                        # already contains every conversion failure before
+                        # this loop starts, and `path not in missing` was
+                        # just checked above.
+                        new_objects = import_glb(glb_map[path], level_col)
+                        if new_objects:
+                            stamp_light_shadow_flags(new_objects)
+                        if self.only_g_meshes and new_objects:
+                            new_objects = filter_g_meshes(new_objects)
+                            if not new_objects:
+                                no_geometry.add(path)
+                        if self.strip_material_meshes and new_objects:
+                            new_objects = filter_material_meshes(new_objects)
+                            if not new_objects:
+                                no_geometry.add(path)
+                        if new_objects:
+                            apply_light_cone_mode(
+                                new_objects, self.light_cone_mode,
+                                self.light_cone_strength,
+                                self.light_cone_falloff)
+                        if self.import_textures and new_objects:
+                            apply_pd2_materials(new_objects, path,
+                                                assets_dir)
                     if (not new_objects and path not in missing
                             and path not in no_geometry):
                         n_failed += 1
@@ -4111,7 +4369,7 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
 
                 for iu in g["units"]:
                     prog += 1
-                    if prog % 25 == 0:
+                    if prog % 50 == 0:
                         wm.progress_update(prog)
                     path = iu["path"]
                     objs = []
@@ -4176,7 +4434,7 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
                 level_col.children.link(mass_col)
                 for mi_i, mi in enumerate(mass_instances, 1):
                     prog += 1
-                    if mi_i == 1 or mi_i == len(mass_instances) or mi_i % 50 == 0:
+                    if mi_i == 1 or mi_i == len(mass_instances) or mi_i % 100 == 0:
                         wm.progress_update(prog)
                     path = mi["path"]
                     if path in missing:
@@ -4257,11 +4515,53 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
 
             clear_internal_markers(level_col)
 
+        # Optional second material pass for any meshes that still lack a
+        # pd2_tex_sig (e.g. objects created outside the prototype path).
+        # The primary rebuild already happens on prototypes after filtering.
+        if self.import_textures and self.defer_materials:
+            log("Secondary material pass (objects missing pd2 textures)...")
+            t_mat = time.time()
+            by_path = {}
+            for o in level_col.all_objects:
+                if o.type != 'MESH' or o.data is None:
+                    continue
+                needs = False
+                for slot in o.material_slots:
+                    mat = slot.material
+                    if mat is not None and not mat.get("pd2_tex_sig"):
+                        needs = True
+                        break
+                if not needs:
+                    continue
+                path = o.get("unit_path")
+                if not path:
+                    p = o.parent
+                    depth = 0
+                    while p is not None and depth < 16:
+                        path = p.get("unit_path")
+                        if path:
+                            break
+                        p = p.parent
+                        depth += 1
+                if path:
+                    by_path.setdefault(path, []).append(o)
+            n_mats_final = 0
+            for path, group in by_path.items():
+                n_mats_final += apply_pd2_materials(group, path, assets_dir)
+            if n_mats_final or by_path:
+                log(f"Secondary materials: rebuilt {n_mats_final} material(s) "
+                    f"across {len(by_path)} unit path(s) in "
+                    f"{time.time() - t_mat:.1f}s")
+
         if self.merge_materials:
             log("Merging duplicate materials...")
             merge_duplicate_materials()
 
-        bpy.context.view_layer.update()
+        # Single update at the very end instead of scattered ones
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
 
         elapsed = time.time() - t_start
         summary = (f"Done in {elapsed:.1f}s (convert {t_convert:.1f}s, "
@@ -4312,16 +4612,15 @@ class IMPORT_OT_pd2_level_json(Operator, ImportHelper):
         layout.prop(self, "strip_material_meshes")
         layout.prop(self, "glass_fresnel")
         layout.prop(self, "light_cone_mode")
-        if self.light_cone_mode in {'FAKE', 'VOLUME'}:
-            layout.prop(self, "light_cone_strength")
         if self.light_cone_mode == 'FAKE':
+            layout.prop(self, "light_cone_strength")
             layout.prop(self, "light_cone_falloff")
-        if self.light_cone_mode == 'VOLUME':
-            layout.prop(self, "light_cone_density")
         layout.prop(self, "import_textures")
         layout.prop(self, "convert_instances")
         layout.prop(self, "import_instances")
         layout.prop(self, "import_massunits")
+        layout.prop(self, "scan_extra_continents")
+        layout.prop(self, "defer_materials")
 
         layout.separator()
         layout.label(text="Lights:")
@@ -4347,8 +4646,6 @@ def menu_func_import(self, context):
                          text="PAYDAY 2 Level (.json)")
 
 class PD2_OT_reapply_materials(Operator):
-\
-\
 
     bl_idname = "pd2_importer.reapply_materials"
     bl_label = "Re-apply PD2 Materials"
